@@ -6,7 +6,7 @@
  * (appairage), renommage (avec les entités HA) et suppression.
  * Style verre, thème clair/sombre automatique, éditeur visuel, textes en français.
  */
-const CARD_VERSION = "1.0.0";
+const CARD_VERSION = "1.1.0";
 
 /* === NUANCE COMMUNE v2 (cartes Johan854) === */
 const GV_NUANCES = [["braise", "Braise (rouge)", "#e0524f"], ["ocean", "Océan (bleu)", "#2f8fd8"], ["lagon", "Lagon (turquoise)", "#1fb5a8"], ["foret", "Forêt (vert)", "#3fae5a"], ["lavande", "Lavande (violet)", "#8a63d8"], ["framboise", "Framboise (rose)", "#e05597"], ["ambre", "Ambre (orange)", "#e8902c"], ["ardoise", "Ardoise (neutre)", "#7d8595"]];
@@ -40,6 +40,7 @@ const DEFAULTS = {
   bridge_prefix: "zigbee2mqtt_bridge", // préfixe des entités du pont (sensor.<préfixe>_network_map…)
   view: "carte", // carte | liste
   map_height: 340,
+  lqi_scale: true, // distance au coordinateur (ou au relais) proportionnelle à la qualité de liaison
 };
 
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -215,7 +216,7 @@ class ZigbeeNetworkCard extends HTMLElement {
       ${this._msg ? `<div class="msg">${esc(this._msg)}</div>` : ""}
       ${joining ? `<div class="hint">Mets le nouvel appareil en mode appairage (en général un appui long sur son bouton). Il apparaîtra dans « Appareils » avec l'étiquette « Nouveau » : renomme-le aussitôt avec le crayon.</div>` : ""}
       ${view === "carte" ? (nm ? `<div class="map"><svg id="svg"></svg></div>
-        <div class="leg"><span><i style="background:#3fae5a"></i>Bonne (≥ 100)</span><span><i style="background:#e8902c"></i>Moyenne (50-99)</span><span><i style="background:#e0524f"></i>Faible (&lt; 50)</span><span>● secteur (relais) · ○ sur pile</span></div>`
+        <div class="leg"><span><i style="background:#3fae5a"></i>Bonne (≥ 100)</span><span><i style="background:#e8902c"></i>Moyenne (50-99)</span><span><i style="background:#e0524f"></i>Faible (&lt; 50)</span><span>● secteur (relais) · ○ sur pile</span>${c.lqi_scale !== false ? "<span>Plus un appareil est loin, plus sa liaison est faible</span>" : ""}</div>`
         : `<div class="hint">${needMap ? `L'entité <b>sensor.${esc(p)}_network_map</b> est introuvable : active-la dans Paramètres → Entités (elle est désactivée par défaut), puis appuie sur « Analyser ».` : "Pas encore de carte : appuie sur « Analyser »."}</div>`)
         : `<div class="list">${list || '<div class="hint">Aucun appareil trouvé.</div>'}</div>`}
     </ha-card>`;
@@ -237,28 +238,46 @@ class ZigbeeNetworkCard extends HTMLElement {
   }
   _draw(nm) {
     const svg = this.shadowRoot.getElementById("svg"); if (!svg) return;
-    const W = svg.clientWidth || 600, H = svg.clientHeight || 340, cx = W / 2, cy = H / 2, R = Math.min(W, H) / 2 - 34;
+    const W = svg.clientWidth || 600, H = svg.clientHeight || 340, cx = W / 2, cy = H / 2, R = 1, RX = Math.max(60, W / 2 - 90), RY = Math.max(50, H / 2 - 30);
     const pos = {}, coord = nm.nodes.find((n) => n.type === "Coordinator");
     if (coord) pos[coord.id] = [cx, cy];
     const routers = nm.nodes.filter((n) => n.type === "Router"), ends = nm.nodes.filter((n) => n.type === "EndDevice");
-    routers.forEach((n, i) => { const a = (i / Math.max(1, routers.length)) * Math.PI * 2 - Math.PI / 2; pos[n.id] = [cx + Math.cos(a) * R * 0.48, cy + Math.sin(a) * R * 0.48]; n.a = a; });
-    // appareils sur pile sur l'anneau extérieur, regroupés autour de leur parent
+    // qualité de liaison : valeur en direct (entité _linkquality) si disponible, sinon celle de l'analyse
+    nm.nodes.forEach((n) => { const li = this._deviceInfo(n.name).lqi; n.lq = li != null ? li : n.q; });
+    const scale = this._config.lqi_scale !== false;
+    // distance = qualité : 255 = tout près, 0 = au bord
+    const dist = (q, rmin, rmax) => (scale && q != null ? rmin + (1 - Math.max(0, Math.min(255, q)) / 255) * (rmax - rmin) : rmax);
+    
+    routers.forEach((n, i) => { const a = (i / Math.max(1, routers.length)) * Math.PI * 2 - Math.PI / 2; const d = dist(n.lq, R * 0.22, R * 0.62); pos[n.id] = [cx + Math.cos(a) * d * RX, cy + Math.sin(a) * d * RY]; n.a = a; });
+    // appareils sur pile regroupés autour de leur parent
     const ang = (n) => { const p = n.parent && nm.byId[n.parent]; return p && p.a != null ? p.a : -Math.PI / 2; };
     ends.sort((x, y) => ang(x) - ang(y) || x.name.localeCompare(y.name));
-    ends.forEach((n, i) => { const a = (i / Math.max(1, ends.length)) * Math.PI * 2 - Math.PI / 2 + (routers.length ? 0 : Math.PI / Math.max(1, ends.length)); pos[n.id] = [cx + Math.cos(a) * R, cy + Math.sin(a) * R * 0.92]; n.a2 = a; });
+    ends.forEach((n, i) => {
+      const a = (i / Math.max(1, ends.length)) * Math.PI * 2 - Math.PI / 2 + (routers.length ? 0 : Math.PI / Math.max(1, ends.length));
+      const par = n.parent && nm.byId[n.parent];
+      if (par && par.type === "Router" && pos[par.id]) { // autour du relais
+        const [px, py] = pos[par.id], d = dist(n.lq, R * 0.18, R * 0.42);
+        pos[n.id] = [px + Math.cos(a) * d * RX, py + Math.sin(a) * d * RY];
+      } else { const d = dist(n.lq, R * 0.28, R); pos[n.id] = [cx + Math.cos(a) * d * RX, cy + Math.sin(a) * d * RY]; }
+      n.a2 = a;
+    });
     let g = "";
+    if (this._config.lqi_scale !== false) [200, 150, 100, 50].forEach((q) => {
+      const d = R * 0.28 + (1 - q / 255) * (R - R * 0.28);
+      g += `<ellipse cx="${cx}" cy="${cy}" rx="${d * RX}" ry="${d * RY}" fill="none" stroke="var(--mu)" stroke-opacity=".22" stroke-dasharray="3 4"/><text class="q" x="${cx + d * RX + 3}" y="${cy - 3}">${q}</text>`;
+    });
     nm.nodes.forEach((n) => {
       if (!n.parent || !pos[n.id] || !pos[n.parent]) return;
-      const [x1, y1] = pos[n.id], [x2, y2] = pos[n.parent], col = lqiCol(n.q);
+      const [x1, y1] = pos[n.id], [x2, y2] = pos[n.parent], col = lqiCol(n.lq);
       g += `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}" stroke="${col}" stroke-width="2" stroke-opacity=".85"/>`;
-      if (n.q != null) g += `<text class="q" x="${(x1 * 0.45 + x2 * 0.55).toFixed(1)}" y="${(y1 * 0.45 + y2 * 0.55 - 3).toFixed(1)}" text-anchor="middle">${n.q}</text>`;
+      if (n.lq != null) g += `<text class="q" x="${(x1 * 0.5 + x2 * 0.5).toFixed(1)}" y="${(y1 * 0.5 + y2 * 0.5 - 3).toFixed(1)}" text-anchor="middle">${n.lq}</text>`;
     });
     nm.nodes.forEach((n) => {
       const p = pos[n.id]; if (!p) return;
       const [x, y] = p, isC = n.type === "Coordinator", isR = n.type === "Router", info = this._deviceInfo(n.name);
-      const fill = isC ? "var(--ac)" : info.unavail || n.failed ? "#e0524f" : isR ? lqiCol(n.q) : "var(--gl)";
-      const stroke = isC ? "var(--ac)" : lqiCol(n.q);
-      g += `<g><title>${esc(n.name)} — ${esc(TYPE[n.type] || "")}${n.q != null ? ` — LQI ${n.q}` : ""}</title><circle cx="${x}" cy="${y}" r="${isC ? 16 : isR ? 9 : 7}" fill="${fill}" stroke="${stroke}" stroke-width="2.5"/>`;
+      const fill = isC ? "var(--ac)" : info.unavail || n.failed ? "#e0524f" : isR ? lqiCol(n.lq) : "var(--gl)";
+      const stroke = isC ? "var(--ac)" : lqiCol(n.lq);
+      g += `<g><title>${esc(n.name)} — ${esc(TYPE[n.type] || "")}${n.lq != null ? ` — LQI ${n.lq}` : ""}</title><circle cx="${x}" cy="${y}" r="${isC ? 16 : isR ? 9 : 7}" fill="${fill}" stroke="${stroke}" stroke-width="2.5"/>`;
       const above = isC || y < cy, ta = isC ? "middle" : x < cx - 8 ? "end" : x > cx + 8 ? "start" : "middle", dx = ta === "end" ? -10 : ta === "start" ? 10 : 0;
       g += `<text x="${x + dx}" y="${isC ? y + 30 : above ? y - 10 : y + 18}" text-anchor="${ta}">${esc(isC ? "Coordinateur" : n.name)}</text></g>`;
     });
@@ -268,7 +287,7 @@ class ZigbeeNetworkCard extends HTMLElement {
   }
 }
 
-const LABELS = { ...GV_LABELS, name: "Titre", base_topic: "Topic de base Zigbee2MQTT", bridge_prefix: "Préfixe des entités du pont", view: "Vue au démarrage", map_height: "Hauteur de la carte (px)", theme: "Thème" };
+const LABELS = { ...GV_LABELS, name: "Titre", base_topic: "Topic de base Zigbee2MQTT", bridge_prefix: "Préfixe des entités du pont", view: "Vue au démarrage", map_height: "Hauteur de la carte (px)", lqi_scale: "Distance selon la qualité de liaison", theme: "Thème" };
 class ZigbeeNetworkCardEditor extends HTMLElement {
   setConfig(c) { this._config = { ...DEFAULTS, ...c }; if (!this._form) this._build(); else this._form.data = this._config; }
   set hass(h) { this._hass = h; if (this._form) this._form.hass = h; }
@@ -280,6 +299,7 @@ class ZigbeeNetworkCardEditor extends HTMLElement {
       { type: "grid", name: "", schema: [
         { name: "view", selector: { select: { mode: "dropdown", options: [{ value: "carte", label: "Carte" }, { value: "liste", label: "Appareils" }] } } },
         { name: "map_height", selector: { number: { min: 200, max: 800, step: 10, mode: "box" } } }] },
+      { name: "lqi_scale", selector: { boolean: {} } },
       { type: "grid", name: "", schema: [
         { name: "base_topic", selector: { text: {} } },
         { name: "bridge_prefix", selector: { text: {} } }] },

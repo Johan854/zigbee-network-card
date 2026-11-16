@@ -2,7 +2,7 @@
 
 Carte Home Assistant pour piloter son réseau **Zigbee2MQTT** sans quitter le tableau de bord :
 
-- **Carte du réseau** : coordinateur au centre, relais (appareils sur secteur) sur un anneau intérieur, appareils sur pile autour, liaisons colorées selon leur qualité (LQI) : vert ≥ 100, orange 50-99, rouge < 50 ;
+- **Carte du réseau** : coordinateur au centre, distance de chaque appareil proportionnelle à sa qualité de liaison, relais (appareils sur secteur) sur un anneau intérieur, appareils sur pile autour, liaisons colorées selon leur qualité (LQI) : vert ≥ 100, orange 50-99, rouge < 50 ;
 - **Liste des appareils** : qualité de liaison, batterie, dernier message, par où il passe ; nouveaux appareils et appareils indisponibles en tête ;
 - **Ajouter un appareil** : ouvre l'appairage (avec compte à rebours) et l'arrête ;
 - **Renommer** un appareil (les entités Home Assistant suivent le nouveau nom) ;
@@ -32,6 +32,7 @@ nuance: ambre
 | `name` | `Réseau Zigbee` | Titre |
 | `view` | `carte` | Vue au démarrage : `carte` ou `liste` |
 | `map_height` | `340` | Hauteur de la carte (px) |
+| `lqi_scale` | `true` | Distance « à l'échelle » : plus un appareil est loin du coordinateur (ou de son relais), plus sa liaison est faible ; cercles repères LQI 200 / 150 / 100 / 50 |
 | `base_topic` | `zigbee2mqtt` | Topic de base de Zigbee2MQTT |
 | `bridge_prefix` | `zigbee2mqtt_bridge` | Préfixe des entités du pont |
 | `theme` | `auto` | `auto`, `light`, `dark` |
